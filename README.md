@@ -37,7 +37,7 @@ The core challenge is that Claude Code doesn't expose a per-category token break
 
 ### 1. BPE Tokenization via tiktoken (`cl100k_base`)
 
-We use OpenAI's [tiktoken](https://github.com/openai/tiktoken) library with the `cl100k_base` encoding — the same byte-pair encoding (BPE) tokenizer that Claude-family models use. This gives us exact token counts rather than the naive `len(text) / 4` heuristic (which can be off by 2-3x for CJK text, code, or structured data).
+We use OpenAI's [tiktoken](https://github.com/openai/tiktoken) library with the `cl100k_base` encoding — a BPE tokenizer with a similar vocabulary structure to Claude's. Claude's actual tokenizer is not publicly available for offline use (the only accurate option is the `anthropic.beta.messages.count_tokens()` API call, which is too slow for a status line). `cl100k_base` gives a close approximation: typically within 5% for English and code, with slightly larger variance for CJK text. This is far better than the naive `len(text) / 4` heuristic (which can be off by 2–3× for structured data).
 
 ```python
 import tiktoken
