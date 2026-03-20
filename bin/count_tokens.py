@@ -198,10 +198,20 @@ def count_session_messages(project_cwd: str) -> dict:
                         user_tokens += count(content)
                     elif isinstance(content, list):
                         for block in content:
-                            if isinstance(block, dict):
-                                text = block.get("text", "")
-                                if text:
-                                    user_tokens += count(text)
+                            if not isinstance(block, dict):
+                                continue
+                            btype = block.get("type", "")
+                            if btype == "text":
+                                user_tokens += count(block.get("text", ""))
+                            elif btype == "tool_result":
+                                # Tool outputs live here (bash results, file reads, etc.)
+                                res = block.get("content", "")
+                                if isinstance(res, str):
+                                    user_tokens += count(res)
+                                elif isinstance(res, list):
+                                    for r in res:
+                                        if isinstance(r, dict):
+                                            user_tokens += count(r.get("text", ""))
 
                 elif msg_type == "assistant":
                     assistant_turns += 1
@@ -209,20 +219,13 @@ def count_session_messages(project_cwd: str) -> dict:
                         assistant_tokens += count(content)
                     elif isinstance(content, list):
                         for block in content:
-                            if isinstance(block, dict):
-                                if block.get("type") == "text":
-                                    assistant_tokens += count(block.get("text", ""))
-                                elif block.get("type") == "tool_use":
-                                    inp = block.get("input", {})
-                                    assistant_tokens += count(json.dumps(inp))
-                                elif block.get("type") == "tool_result":
-                                    res = block.get("content", "")
-                                    if isinstance(res, str):
-                                        assistant_tokens += count(res)
-                                    elif isinstance(res, list):
-                                        for r in res:
-                                            if isinstance(r, dict):
-                                                assistant_tokens += count(r.get("text", ""))
+                            if not isinstance(block, dict):
+                                continue
+                            btype = block.get("type", "")
+                            if btype == "text":
+                                assistant_tokens += count(block.get("text", ""))
+                            elif btype == "tool_use":
+                                assistant_tokens += count(json.dumps(block.get("input", {})))
     except Exception:
         pass
 
@@ -247,6 +250,10 @@ AUTOCOMPACT_RATIO = 0.165  # 16.5% of context window
 def main():
     project_cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     context_size = int(sys.argv[2]) if len(sys.argv) > 2 else 200000
+    # Optional: actual total from Claude Code's API usage (input+cache_creation+cache_read).
+    # When provided, breakdown categories are scaled proportionally so they sum to this value,
+    # eliminating tokenizer drift and hardcoded-constant errors in one step.
+    actual_total = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
     skills = count_skills()
     claude_md = count_claude_md(project_cwd)
@@ -255,7 +262,7 @@ def main():
 
     autocompact_buffer = int(context_size * AUTOCOMPACT_RATIO)
 
-    used = (
+    estimated = (
         SYSTEM_PROMPT_TOKENS
         + SYSTEM_TOOLS_TOKENS
         + mcp["total"]
@@ -264,25 +271,49 @@ def main():
         + messages["total"]
     )
 
+    # Proportional calibration: if the caller gives us the real API total, scale every
+    # breakdown category so they sum to it.  This removes tokenizer drift and
+    # hardcoded-constant errors at once, while preserving relative proportions.
+    if actual_total > 0 and estimated > 0:
+        ratio = actual_total / estimated
+        sys_tok   = int(SYSTEM_PROMPT_TOKENS * ratio)
+        tools_tok = int(SYSTEM_TOOLS_TOKENS  * ratio)
+        mcp_tok   = int(mcp["total"]         * ratio)
+        sk_tok    = int(skills["total"]      * ratio)
+        md_tok    = int(claude_md["total"]   * ratio)
+        msg_tok   = int(messages["total"]    * ratio)
+        used      = actual_total
+        calibrated = True
+    else:
+        sys_tok   = SYSTEM_PROMPT_TOKENS
+        tools_tok = SYSTEM_TOOLS_TOKENS
+        mcp_tok   = mcp["total"]
+        sk_tok    = skills["total"]
+        md_tok    = claude_md["total"]
+        msg_tok   = messages["total"]
+        used      = estimated
+        calibrated = False
+
     free = max(0, context_size - used - autocompact_buffer)
 
     result = {
         "context_size": context_size,
-        "system_prompt": SYSTEM_PROMPT_TOKENS,
-        "system_tools": SYSTEM_TOOLS_TOKENS,
-        "mcp_tools": mcp["total"],
+        "system_prompt": sys_tok,
+        "system_tools": tools_tok,
+        "mcp_tools": mcp_tok,
         "mcp_servers": mcp["servers"],
-        "skills": skills["total"],
+        "skills": sk_tok,
         "skills_count": skills["count"],
-        "claude_md": claude_md["total"],
+        "claude_md": md_tok,
         "claude_md_files": claude_md["files"],
-        "messages": messages["total"],
+        "messages": msg_tok,
         "messages_turns": messages["turns"],
         "messages_user": messages["user_tokens"],
         "messages_assistant": messages["assistant_tokens"],
         "autocompact_buffer": autocompact_buffer,
         "used": used,
         "free": free,
+        "calibrated": calibrated,
     }
 
     json.dump(result, sys.stdout, indent=2)

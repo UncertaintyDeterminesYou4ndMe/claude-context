@@ -1,6 +1,6 @@
 # claude-context
 
-A precise context window monitor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Replaces the default status line with a detailed, real-time breakdown of exactly where your tokens are going.
+A context window monitor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Replaces the default status line with a real-time breakdown of where your tokens are going.
 
 ```
 Opus 4.6 (1M context) ▊░░░░ 3% 32.5k/1.0m · my-project (main*) · 12m  ░░░ 0% 5:23pm  ░░░ 0%w
@@ -31,73 +31,77 @@ Restart Claude Code after install.
 
 **Line 3** (conditional) — Warnings when context or rate limit utilization exceeds 80%
 
-## Token Counting: How We Get Precision
+## Accuracy: What's Precise and What Isn't
 
-The core challenge is that Claude Code doesn't expose a per-category token breakdown. We reconstruct it by reading the same sources Claude Code reads, and counting tokens with the same algorithm the model uses.
+Claude Code doesn't expose a per-category token breakdown, so we reconstruct it from external sources. Here's an honest account of where the numbers come from and where they can drift.
 
-### 1. BPE Tokenization via tiktoken (`cl100k_base`)
+### What's accurate
 
-We use OpenAI's [tiktoken](https://github.com/openai/tiktoken) library with the `cl100k_base` encoding — a BPE tokenizer with a similar vocabulary structure to Claude's. Claude's actual tokenizer is not publicly available for offline use (the only accurate option is the `anthropic.beta.messages.count_tokens()` API call, which is too slow for a status line). `cl100k_base` gives a close approximation: typically within 5% for English and code, with slightly larger variance for CJK text. This is far better than the naive `len(text) / 4` heuristic (which can be off by 2–3× for structured data).
+**Total context usage (Line 1)** is read directly from Claude Code's own status line JSON (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`). This is the official API value and is always correct.
+
+**Proportional calibration**: we pass the real total into the breakdown script as a scaling anchor. All per-category values are multiplied by `actual_total / estimated_total`, so the breakdown always sums to the true total. Per-category proportions are estimates; the sum is not.
+
+### Known sources of error
+
+| Source | Method | Typical error |
+|---|---|---|
+| **System prompt** | Hardcoded ~5,600 tokens | ±10–20% — changes with Claude Code version |
+| **Built-in tools** | Hardcoded ~19,300 tokens | ±10–20% — changes with Claude Code version |
+| **MCP tools** | ~150 tokens per server, flat estimate | High variance — actual schema size varies widely |
+| **Skills** | Parsed from `SKILL.md`, tokenized | Low — reads actual files |
+| **CLAUDE.md** | Full file tokenized | Low — reads actual files |
+| **Messages** | JSONL session log parsed and tokenized | Low–medium — see below |
+| **Tokenizer** | `cl100k_base` (GPT-4's BPE) not Claude's | ~5% for English/code, larger for CJK |
+| **Autocompact buffer** | Fixed 16.5% of context window | Unknown — internal to Claude Code |
+
+**On message counting**: we parse Claude Code's JSONL session log and tokenize user text, assistant text, `tool_use` inputs, and `tool_result` outputs. Large tool outputs (bash results, file reads) are the main source of drift — they're present in the JSONL but may be truncated or formatted differently than what Claude Code actually sends to the API.
+
+**Practical accuracy**: in testing, the uncalibrated message estimate is typically within 20–30% of the true API value. After proportional calibration, the total is exact, and per-category numbers are reasonable for a visual breakdown.
+
+### Why not use the Anthropic API for exact counts?
+
+`anthropic.beta.messages.count_tokens()` would give exact per-category counts, but it requires a network round-trip on every status line refresh (~500ms+), which makes the status line unusable. The current approach runs in ~200ms locally and caches for 60 seconds.
+
+## How Token Counting Works
+
+### BPE Tokenization via tiktoken (`cl100k_base`)
 
 ```python
 import tiktoken
 enc = tiktoken.get_encoding("cl100k_base")
-tokens = len(enc.encode(text))  # exact count
+tokens = len(enc.encode(text))
 ```
 
-If tiktoken is not installed, we fall back to the `chars / 4` approximation — but the README and installer strongly recommend installing it.
+Claude's actual tokenizer is not publicly available for offline use. `cl100k_base` (GPT-4's encoder) is used as a proxy — it shares the same BPE structure and gives reasonable approximations for most content. Falls back to `len(text) // 4` if tiktoken is not installed.
 
-### 2. Three-Channel Context Usage
-
-Claude Code reports token usage across three channels. We aggregate all three for accurate total context consumption:
+### Three-Channel Context Usage
 
 ```
 total = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
 ```
 
-- `input_tokens` — freshly processed tokens
-- `cache_creation_input_tokens` — tokens written into the prompt cache this turn
-- `cache_read_input_tokens` — tokens served from the prompt cache
+All three channels count toward context consumption. Ignoring cache tokens underestimates actual usage significantly.
 
-Ignoring cache tokens (a common mistake) would dramatically undercount actual context usage.
+### Session Message Parsing
 
-### 3. Multi-Source Context Reconstruction
+We read `~/.claude/projects/<dir>/*.jsonl` and tokenize each turn:
 
-We enumerate every source that occupies space in the context window:
+- **User turns**: plain text + `tool_result` blocks (bash outputs, file reads, etc.)
+- **Assistant turns**: text blocks + `tool_use` inputs (JSON-serialized)
 
-| Category | Method |
-|---|---|
-| **System prompt** | Fixed calibration (~5,600 tokens) — measured against Claude Code's `/context` output |
-| **Built-in tools** | Fixed calibration (~19,300 tokens) — tool schemas are stable across versions |
-| **MCP tools** | Estimated per registered server (~150 tokens each) from `~/.claude/settings.json` |
-| **Skills** | Parsed from `SKILL.md` files — name + description + path, tokenized with tiktoken |
-| **CLAUDE.md** | All `CLAUDE.md` / `CLAUDE.local.md` files (global + project + parent dir) tokenized |
-| **Messages** | Session JSONL parsed: user text, assistant text, `tool_use` inputs, `tool_result` outputs |
-| **Autocompact buffer** | 16.5% of context window reserved for Claude's autocompact mechanism |
-| **Free** | `context_window - used - buffer` |
+### Skill Deduplication
 
-### 4. Session Message Parsing
+Skills appearing in both `~/.claude/skills/` and `~/.agents/skills/` are deduplicated by name, keeping the larger token count.
 
-We read Claude Code's JSONL session log (`~/.claude/projects/<dir>/*.jsonl`) and tokenize each message component:
+### Caching
 
-- **User turns**: plain text and multi-block content arrays
-- **Assistant turns**: text blocks, `tool_use` blocks (JSON-serialized input), and `tool_result` blocks (text or content arrays)
-
-This captures the actual conversation footprint, not just a rough estimate.
-
-### 5. Skill Deduplication
-
-Skills may exist in both `~/.claude/skills/` and `~/.agents/skills/`. When the same skill name appears in both directories, we keep only the larger token count to avoid double-counting.
-
-### 6. Caching
-
-Token counting runs `python3` + tiktoken which takes ~200ms. To keep the status line responsive, results are cached for 60 seconds in `/tmp/claude/ctx-cache.json`. Rate limit API responses are similarly cached.
+Results cached 60 seconds in `/tmp/claude/ctx-cache.json` to keep the status line fast.
 
 ## Visual Design
 
-- **Nord Aurora** color palette for consistent, readable theming
-- **High-density progress bars** using Unicode block elements (`▏▎▍▌▋▊▉█`) — 8 sub-steps per character for smooth visual precision
-- **Color-coded thresholds**: green (<50%) → orange (50-70%) → yellow (70-90%) → red (>90%)
+- **Nord Aurora** color palette
+- **High-density progress bars** using Unicode block elements (`▏▎▍▌▋▊▉█`) — 8 sub-steps per character
+- **Color-coded thresholds**: green (<50%) → orange (50–70%) → yellow (70–90%) → red (>90%)
 
 ## Dependencies
 
