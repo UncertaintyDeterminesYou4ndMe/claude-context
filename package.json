@@ -1,0 +1,18 @@
+{
+  "name": "claude-context",
+  "version": "1.0.0",
+  "description": "Claude Code statusline with detailed context breakdown, session token usage, and rate limits",
+  "bin": {
+    "claude-context": "./bin/install.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "statusline",
+    "context",
+    "tokens",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": ""
+}
