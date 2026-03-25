@@ -31,32 +31,50 @@ Restart Claude Code after install.
 
 **Line 3** (conditional) — Warnings when context or rate limit utilization exceeds 80%
 
-## Accuracy: What's Precise and What Isn't
+## Accuracy: Three-Tier Precision
 
-Claude Code doesn't expose a per-category token breakdown, so we reconstruct it from external sources. Here's an honest account of where the numbers come from and where they can drift.
+Claude Code doesn't expose a per-category token breakdown, so we reconstruct it. The system uses three tiers of precision, automatically selecting the best available.
 
-### What's accurate
+### Tier 1: First-Turn Anchoring + Differential Counting (best)
 
-**Total context usage (Line 1)** is read directly from Claude Code's own status line JSON (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`). This is the official API value and is always correct.
+When both JSONL session data and the real API total are available:
 
-**Proportional calibration**: we pass the real total into the breakdown script as a scaling anchor. All per-category values are multiplied by `actual_total / estimated_total`, so the breakdown always sums to the true total. Per-category proportions are estimates; the sum is not.
+1. **Overhead** (system prompt + tools + skills + CLAUDE.md) is measured from the first API turn's real `usage` data in the JSONL — no hardcoded constants needed
+2. **Messages** = `actual_total - overhead` — exact, no tokenizer involved
+3. **Total** = real API value — always exact
 
-### Known sources of error
+The overhead is computed once per session and cached. Within overhead, `sys` vs `tools` is split using a fixed ratio (~22.5% / 77.5%); `skills` and `CLAUDE.md` are measured directly from files.
 
-| Source | Method | Typical error |
-|---|---|---|
-| **System prompt** | Hardcoded ~5,600 tokens | ±10–20% — changes with Claude Code version |
-| **Built-in tools** | Hardcoded ~19,300 tokens | ±10–20% — changes with Claude Code version |
-| **MCP tools** | ~150 tokens per server, flat estimate | High variance — actual schema size varies widely |
-| **Skills** | Parsed from `SKILL.md`, tokenized | Low — reads actual files |
-| **CLAUDE.md** | Full file tokenized | Low — reads actual files |
-| **Messages** | JSONL session log parsed and tokenized | Low–medium — see below |
-| **Tokenizer** | `cl100k_base` (GPT-4's BPE) not Claude's | ~5% for English/code, larger for CJK |
-| **Autocompact buffer** | Fixed 16.5% of context window | Unknown — internal to Claude Code |
+### Tier 2: First-Turn Anchoring + tiktoken Messages
 
-**On message counting**: we parse Claude Code's JSONL session log and tokenize user text, assistant text, `tool_use` inputs, and `tool_result` outputs. Large tool outputs (bash results, file reads) are the main source of drift — they're present in the JSONL but may be truncated or formatted differently than what Claude Code actually sends to the API.
+When JSONL is available but the real API total is not (e.g., session just started):
 
-**Practical accuracy**: in testing, the uncalibrated message estimate is typically within 20–30% of the true API value. After proportional calibration, the total is exact, and per-category numbers are reasonable for a visual breakdown.
+- Overhead: measured (same as Tier 1)
+- Messages: tokenized from JSONL with `cl100k_base` (~5% error for English, larger for CJK)
+
+### Tier 3: Hardcoded Constants + Proportional Calibration (fallback)
+
+When JSONL is unavailable:
+
+- System prompt: hardcoded ~5,600 tokens
+- Built-in tools: hardcoded ~19,300 tokens
+- If the real API total is available, all categories are scaled proportionally to match it
+
+### Accuracy summary
+
+| Source | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|
+| **Total** | Exact (API) | Estimated | Estimated or calibrated |
+| **Overhead** (sys+tools) | <1% (measured) | <1% (measured) | ±10–20% (hardcoded) |
+| **Messages** | Exact (differential) | ~5–20% (tiktoken) | ~5–20% (tiktoken) |
+| **Skills / CLAUDE.md** | Low (reads files) | Low (reads files) | Low (reads files) |
+| **MCP tools** | ~150 tok/server est. | ~150 tok/server est. | ~150 tok/server est. |
+
+### Known limitations
+
+- **Autocompact**: when Claude Code compresses context mid-session, the overhead can change (tools get deferred). The system detects this via a >30% drop in total and falls back to Tier 3
+- **Tokenizer**: `cl100k_base` (GPT-4's BPE) is used as a proxy for Claude's tokenizer. In Tier 1, this only affects the user/assistant split within messages — the total is exact regardless
+- **MCP tools**: still estimated at ~150 tokens per server. Actual schema sizes vary widely
 
 ### Why not use the Anthropic API for exact counts?
 
