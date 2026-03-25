@@ -120,7 +120,7 @@ SD="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p /tmp/claude
 cc="/tmp/claude/ctx-cache.json"; cd=""
 [ -f "$cc" ] && { ca=$(( $(date +%s) - $(stat -c %Y "$cc" 2>/dev/null || stat -f %m "$cc" 2>/dev/null) )); [ "$ca" -lt 60 ] && cd=$(cat "$cc"); }
-[ -z "$cd" ] && { tp=$(echo "$input" | jq -r '.transcript_path // empty'); sid=$(echo "$input" | jq -r '.session.id // empty'); cd=$(python3 "$SD/count_tokens.py" "$cwd" "$size" "$cur" "${tp:-$sid}" 2>/dev/null); [ -n "$cd" ] && echo "$cd" | jq -e '.used' >/dev/null 2>&1 && echo "$cd" > "$cc"; }
+[ -z "$cd" ] && { tp=$(echo "$input" | jq -r '.transcript_path // empty'); cd=$(python3 "$SD/count_tokens.py" "$cwd" "$size" "$cur" "$tp" 2>/dev/null); [ -n "$cd" ] && echo "$cd" | jq -e '.used' >/dev/null 2>&1 && echo "$cd" > "$cc"; }
 
 # ── Rate limit (cached 60s) ────────────────────────────
 uc="/tmp/claude/usage-cache.json"; ud=""
